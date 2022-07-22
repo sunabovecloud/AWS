@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Mods. By : SharPrin (Combined Role and Backup Resource Creation Template)
+  Date Last Mod: 07.22.22 
+  This template: 
+  - creates the Backup IAM role required for the automated centralized backup at scale in AWS Organizations using AWS Backup.
+  - creates the Backup KMS Key and Vault required for the automated centralized backup at scale in AWS Organizations using AWS Backup.
+  - it should be deployed in each member account.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: AWS Backup Configuration
+        Parameters:
+          - pCrossAccountBackupRole
+          - pBackupKeyAlias
+          - pMemberBackupVaultName
+          - pOrganizationId
+          - pTagKey1
+          - pTagValue1
+          - pTagKey2  # for Backup Role tag,  uncomment if you do not want it
+          - pTagValue2  # for Backup Role tag,  uncomment if you do not want it
+    ParameterLabels:
+      pCrossAccountBackupRole:
+        default: Enter an IAM Role for the Backu 
+      pBackupKeyAlias:
+        default: Name of the AWS Backup KMS key Alias
+      pMemberBackupVaultName:
+        default: Name of the AWS Backup vault (Case sensitive)
+      pOrganizationId:
+        default: Organization ID
+      pTagKey1:
+        default: Enter a Tag Key for Back up resources
+      pTagValue1:
+        default: Enter a Tag Value for Back up resources
+      pTagKey2:
+        default: Enter a Tag Key for the Role  # comment out if you have no need for this look above comment
+      pTagValue2:
+        default: Enter a Tag Value for the Role # comment out if you have no need for this look above comment
+Parameters:
+  pCrossAccountBackupRole:
+    Type: String
+    Description: This is the name of the IAM role (cross-account backup role for backup activities)
+    Default: "Cross-Account-Backup-Role"  # you can comment this one or use yours if you want uniformity
+  pBackupKeyAlias:
+    Type: String
+    Description: This is the name of the AWS Backup KMS key alias.
+  pMemberBackupVaultName:
+    Type: String
+    Description: This is the name of the member account backup vaults.
+    AllowedPattern: ^[a-zA-Z0-9\-\_\.]{1,50}$
+    ConstraintDescription: Backup vault name is case sensitive. Must contain from 2 to 50 alphanumeric and '-_' characters.
+  pOrganizationId:
+    Type: String
+    Description: This is the AWS Organization ID value.
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+    ConstraintDescription: >
+      The Organization Id must be a 12 character string starting with o- and followed by 10 lower case
+      alphanumeric characters
+  pTagKey1:
+    Type: String
+    Description: This is the tag key to assign to backup resources.
+  pTagValue1:
+    Type: String
+    Description: This is the tag value to assign to backup resources.
+  pTagKey2:   # comment out this and below five lines if you have no need for this look above comment
+    Type: String
+    Description: This is the tag key to assign to backup role.
+  pTagValue2:
+    Type: String
+    Description: This is the tag value to assign to backup role.
+Resources:
+  rMemberAccountBackupKey:
+    Type: AWS::KMS::Key
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F76
+            reason: The principal is restricted by the condition statement
+    Properties:
+      Description: Symmetric AWS CMK for Member Account Backup Vault Encryption
+      EnableKeyRotation: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: !Sub ${pBackupKeyAlias}
+        Statement:
+          -
+            Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+          -
+            Sid: Allow use of the key by authorized Backup principal
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/${pCrossAccountBackupRole}
+            Action:
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:ViaService": !Sub "backup.amazonaws.com"
+          -
+            Sid: Allow alias creation during setup
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action: "kms:CreateAlias"
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:CallerAccount": !Sub ${AWS::AccountId}
+                "kms:ViaService": !Sub "cloudformation.${AWS::Region}.amazonaws.com"        
+      Tags:
+        - Key: !Ref pTagKey1
+          Value: !Ref pTagValue1
+    DependsOn: rOrgAccountBackupRole
+
+  rMemberAccountBackupKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${pBackupKeyAlias}
+      TargetKeyId:
+        !Ref rMemberAccountBackupKey
+  rMemberAccountBackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Ref pMemberBackupVaultName
+      EncryptionKeyArn: !GetAtt rMemberAccountBackupKey.Arn
+      AccessPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow access to backup vault"
+            Effect: Allow
+            Action: backup:CopyIntoBackupVault
+            Resource: "*"
+            Principal: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref pOrganizationId
+# Role Section =====
+  rOrgAccountBackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Description: Allows AWS Backup to access AWS services
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - backup.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+      RoleName: !Sub ${pCrossAccountBackupRole}
+      Tags:  # comment out if you have no need for this tags, look the above comment, 
+        - Key: !Ref pTagKey2   # you can also change it to pTagKey1 &pTagValue1 if you want to
+          Value: !Ref pTagValue2 # have the same tag as all the above backup resources
+Outputs:
+  oMemberAccountBackupVault:
+    Value: !Ref rMemberAccountBackupVault
+  oMemberAccountKMSKey:
+    Value: !Ref rMemberAccountBackupKey
+  oOrgAccountBackupRole:
+    Value: !Ref rOrgAccountBackupRole
